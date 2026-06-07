@@ -212,13 +212,134 @@ class DerivTradingBot:
     # ── Tick processing ───────────────────────────────────────────────────────
 
     def _extract_continuous_tensor(self, history: list[float]) -> list[float]:
-        if len(history) < 30:
-            return [0.0, 0.0, 0.0]
-        recent = history[-30:]
-        over5 = sum(1 for x in recent if int(str(x).replace('.', '')[-1]) > 5)
-        evens = sum(1 for x in recent if int(str(x).replace('.', '')[-1]) % 2 == 0)
+        """Extract rich probabilistic features the AI uses to learn Over/Under patterns.
+        
+        Features:
+        - Digit frequency distribution (10 features: count of each digit 0-9)
+        - Most appearing digit position (normalized 0-1)
+        - Least appearing digit position (normalized 0-1)
+        - Most appearing digit frequency (how dominant it is)
+        - Least appearing digit frequency
+        - Presence of consecutive doubles of the most appearing digit (0 or 1)
+        - Presence of consecutive doubles of the least appearing digit (0 or 1)
+        - Over 5 ratio in recent window
+        - Under 5 ratio in recent window
+        - Mean reversion signal: how far the over5 ratio deviates from 0.5
+        - Current digit streak length (same digit appearing consecutively)
+        - Last digit (normalized 0-1)
+        - Inter-tick velocity (momentum)
+        - Digit entropy (how spread/concentrated the digit distribution is)
+        - Consecutive over-5 streak
+        - Consecutive under-5 streak
+        """
+        from collections import Counter
+        import math
+        
+        if len(history) < 50:
+            return [0.0] * 26  # Return zeros if not enough data
+        
+        # Extract last digits from recent price history
+        recent = history[-50:]
+        digits = [int(str(p).replace('.', '')[-1]) for p in recent]
+        
+        # ── DIGIT FREQUENCY DISTRIBUTION (10 features) ──
+        digit_counts = Counter(digits)
+        total = len(digits)
+        freq = [digit_counts.get(d, 0) / total for d in range(10)]  # normalized [0,1]
+        
+        # ── MOST and LEAST appearing digit ──
+        most_common_digit = max(range(10), key=lambda d: digit_counts.get(d, 0))
+        least_common_digit = min(range(10), key=lambda d: digit_counts.get(d, 0))
+        most_freq = digit_counts.get(most_common_digit, 0) / total
+        least_freq = digit_counts.get(least_common_digit, 0) / total
+        
+        # ── PRESENCE OF DOUBLES ──
+        # Check if the most/least appearing digit appeared consecutively (back-to-back)
+        has_double_most = 0.0
+        has_double_least = 0.0
+        for i in range(1, len(digits)):
+            if digits[i] == digits[i-1]:
+                if digits[i] == most_common_digit:
+                    has_double_most = 1.0
+                if digits[i] == least_common_digit:
+                    has_double_least = 1.0
+        
+        # ── OVER/UNDER 5 RATIOS ──
+        over5_count = sum(1 for d in digits if d > 5)
+        under5_count = sum(1 for d in digits if d < 5)  # digit 5 itself is neutral
+        over5_ratio = over5_count / total
+        under5_ratio = under5_count / total
+        
+        # ── MEAN REVERSION SIGNAL ──
+        # How far the over5 ratio deviates from the expected 0.4 (digits 6,7,8,9 = 4/10)
+        # Positive = over5 has been appearing too much (expect under5 next)
+        # Negative = under5 has been dominating (expect over5 next)
+        mean_reversion = over5_ratio - 0.4
+        
+        # ── CURRENT DIGIT STREAK ──
+        # How many consecutive ticks had the same last digit
+        streak = 1
+        for i in range(len(digits) - 2, -1, -1):
+            if digits[i] == digits[-1]:
+                streak += 1
+            else:
+                break
+        streak_norm = min(streak / 5.0, 1.0)  # normalize, cap at 5
+        
+        # ── LAST DIGIT (normalized) ──
+        last_digit = digits[-1] / 9.0
+        
+        # ── INTER-TICK VELOCITY (momentum) ──
         momentum = sum(abs(recent[i] - recent[i-1]) for i in range(1, len(recent)))
-        return [momentum / 30.0, over5 / 30.0, evens / 30.0]
+        momentum_norm = momentum / len(recent)
+        
+        # ── DIGIT ENTROPY ──
+        # High entropy = digits are spread evenly (hard to predict)
+        # Low entropy = one digit dominates (easier to predict)
+        entropy = 0.0
+        for d in range(10):
+            p = digit_counts.get(d, 0) / total
+            if p > 0:
+                entropy -= p * math.log2(p)
+        entropy_norm = entropy / math.log2(10)  # normalize to [0,1]
+        
+        # ── CONSECUTIVE OVER-5 and UNDER-5 STREAKS ──
+        over5_streak = 0
+        for d in reversed(digits):
+            if d > 5:
+                over5_streak += 1
+            else:
+                break
+        under5_streak = 0
+        for d in reversed(digits):
+            if d < 5:
+                under5_streak += 1
+            else:
+                break
+        
+        # Combine all features into a single vector (26 features total)
+        features = (
+            freq +  # 10 features: digit frequency distribution
+            [
+                most_common_digit / 9.0,    # most appearing digit position (normalized)
+                least_common_digit / 9.0,   # least appearing digit position (normalized)
+                most_freq,                   # how dominant the most appearing digit is
+                least_freq,                  # how rare the least appearing digit is
+                has_double_most,             # 1.0 if doubles of most appearing digit present
+                has_double_least,            # 1.0 if doubles of least appearing digit present
+                over5_ratio,                 # proportion of digits > 5
+                under5_ratio,                # proportion of digits < 5
+                mean_reversion,              # deviation from expected over5 ratio
+                streak_norm,                 # current same-digit streak length
+                last_digit,                  # the last digit itself (normalized)
+                momentum_norm,               # inter-tick velocity
+                entropy_norm,                # digit distribution entropy
+                over5_streak / 5.0,          # recent consecutive over-5 streak
+                under5_streak / 5.0,         # recent consecutive under-5 streak
+                (digits[-1] - digits[-2]) / 9.0 if len(digits) >= 2 else 0.0,  # digit delta
+            ]
+        )
+        return features
 
     def _get_global_shadow_context(self) -> float:
         if not self._global_trade_results:
@@ -239,14 +360,14 @@ class DerivTradingBot:
             self._pending_virtuals[symbol] = []
 
         self._tick_history[symbol].append(quote)
-        if len(self._tick_history[symbol]) > 50:
+        if len(self._tick_history[symbol]) > 100:
             self._tick_history[symbol].pop(0)
 
         # Always broadcast state snapshot so UI can track market readiness
         await self._enqueue_broadcast()
 
         # Only evaluate if we have enough history to form features
-        if len(self._tick_history[symbol]) < 50:
+        if len(self._tick_history[symbol]) < 60:
             return
 
         # Extract continuous features
@@ -291,43 +412,32 @@ class DerivTradingBot:
             self._over_brain.update_count < self._over_brain.WARMUP_UPDATES or
             self._under_brain.update_count < self._under_brain.WARMUP_UPDATES
         )
-        # The continuous_brain no longer returns BLOCK. It always returns EVALUATE and the true Quality Score.
-        # ── DYNAMIC CROSS-MARKET PROBABILITY SCALING ──
-        # The user explicitly requested to avoid hardcoded confidence levels.
-        # Instead, we look at which side needs recovery (Martingale step > 0),
-        # and we scan all 15 markets to ensure THIS market is currently the BEST market for that side.
+        # ── AI-DRIVEN RECOVERY MARKET SELECTION ──
+        # The AI has learned what conditions yield Over 5 and Under 5.
+        # When one side is in recovery (Martingale step > 0), the AI finds
+        # the market where its learned model says that side has the best chance.
+        # When both sides are at step 0, pick the strongest overall signal.
+        # NO hardcoded thresholds — purely the AI's learned probabilities.
         over_step = self._global_tracker_over.step
         under_step = self._global_tracker_under.step
         
-        priority_side = "none"
+        # Determine which side needs recovery
         if over_step > under_step:
-            priority_side = "over"
+            # Over side needs recovery — find best Over market
+            my_score = over_c
+            best_score = max((m.get("p_over", 0.0) for m in self._market_stats.values()), default=0.0)
         elif under_step > over_step:
-            priority_side = "under"
-            
-        best_score = 0.0
-        for m_stat in self._market_stats.values():
-            if priority_side == "over":
-                score = m_stat.get("p_over", 0.0)
-            elif priority_side == "under":
-                score = m_stat.get("p_under", 0.0)
-            else:
-                score = max(m_stat.get("p_over", 0.0), m_stat.get("p_under", 0.0))
-            if score > best_score:
-                best_score = score
-                
-        if priority_side == "over":
-            current_score = over_c
-        elif priority_side == "under":
-            current_score = under_c
+            # Under side needs recovery — find best Under market
+            my_score = under_c
+            best_score = max((m.get("p_under", 0.0) for m in self._market_stats.values()), default=0.0)
         else:
-            current_score = max(over_c, under_c)
-            
-        # We execute if this market is the best market available right now.
-        # We also enforce a bare minimum logical edge (>50%) so it doesn't fire on inherently bad trades.
-        if not in_warmup:
-            if current_score < best_score or current_score <= 0.50:
-                return
+            # Both at same step — pick strongest overall signal
+            my_score = max(over_c, under_c)
+            best_score = max((max(m.get("p_over", 0.0), m.get("p_under", 0.0)) for m in self._market_stats.values()), default=0.0)
+        
+        # Only fire if this market is the best for recovery right now.
+        if not in_warmup and my_score < best_score:
+            return
             
         # GLOBAL LOCK: Only one trade at a time across ALL 15 markets.
         if getattr(self, "_global_real_trade_active", False):
