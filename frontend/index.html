@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Deriv AlgoBot — Live Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ── TOP HEADER ─────────────────────────────────────────────────────── -->
+  <header class="header">
+    <div class="header-left">
+      <div class="logo">
+        <span class="logo-icon">⬡</span>
+        <span class="logo-text">Deriv <strong>AlgoBot</strong></span>
+      </div>
+      <div id="phase-badge" class="phase-badge phase-demo">DEMO</div>
+    </div>
+    <div class="header-center">
+      <div class="stat-pill">
+        <span class="stat-label">Elapsed</span>
+        <span class="stat-value mono" id="elapsed">00:00</span>
+      </div>
+      <div class="stat-pill">
+        <span class="stat-label">WS Status</span>
+        <span class="stat-value" id="ws-status">Connecting…</span>
+      </div>
+      <div class="stat-pill">
+        <span class="stat-label">Ready Markets</span>
+        <span class="stat-value" id="ready-count">0 / 0</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="controls-bar">
+        <select id="account-select" class="control-input">
+          <option value="demo">Demo Account</option>
+          <option value="real">Real Account</option>
+        </select>
+        <div class="control-group">
+          <label>Stake ($)</label>
+          <input type="number" id="input-stake" class="control-input num-input" step="0.05" min="0.35" value="0.35">
+        </div>
+        <div class="control-group">
+          <label>Martingale</label>
+          <input type="number" id="input-mg" class="control-input num-input" step="0.1" min="1.0" value="2.0">
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── MAIN LAYOUT ────────────────────────────────────────────────────── -->
+  <main class="main">
+
+    <!-- LEFT COLUMN: Martingale panels + engine stats -->
+    <aside class="sidebar">
+
+      <!-- Martingale — Over 5 -->
+      <section class="card martingale-card" id="mg-over">
+        <div class="card-header">
+          <span class="card-icon">▲</span>
+          <span class="card-title">Over 5 — Martingale</span>
+          <div class="active-dot" id="dot-over"></div>
+        </div>
+        <div class="mg-grid">
+          <div class="mg-stat">
+            <div class="mg-stat-label">Current Stake</div>
+            <div class="mg-stat-value mono" id="mg-over-stake">$—</div>
+          </div>
+          <div class="mg-stat">
+            <div class="mg-stat-label">Step</div>
+            <div class="mg-stat-value mono" id="mg-over-step">—</div>
+          </div>
+          <div class="mg-stat">
+            <div class="mg-stat-label">Active Trade</div>
+            <div class="mg-stat-value" id="mg-over-active">—</div>
+          </div>
+          <div class="mg-stat">
+            <div class="mg-stat-label">Market</div>
+            <div class="mg-stat-value mono small" id="mg-over-market">—</div>
+          </div>
+        </div>
+        <div class="progress-steps" id="steps-over">
+          <!-- filled by JS -->
+        </div>
+      </section>
+
+      <!-- Martingale — Under 5 -->
+      <section class="card martingale-card" id="mg-under">
+        <div class="card-header">
+          <span class="card-icon under-icon">▼</span>
+          <span class="card-title">Under 5 — Martingale</span>
+          <div class="active-dot" id="dot-under"></div>
+        </div>
+        <div class="mg-grid">
+          <div class="mg-stat">
+            <div class="mg-stat-label">Current Stake</div>
+            <div class="mg-stat-value mono" id="mg-under-stake">$—</div>
+          </div>
+          <div class="mg-stat">
+            <div class="mg-stat-label">Step</div>
+            <div class="mg-stat-value mono" id="mg-under-step">—</div>
+          </div>
+          <div class="mg-stat">
+            <div class="mg-stat-label">Active Trade</div>
+            <div class="mg-stat-value" id="mg-under-active">—</div>
+          </div>
+          <div class="mg-stat">
+            <div class="mg-stat-label">Market</div>
+            <div class="mg-stat-value mono small" id="mg-under-market">—</div>
+          </div>
+        </div>
+        <div class="progress-steps" id="steps-under">
+          <!-- filled by JS -->
+        </div>
+      </section>
+
+      <!-- Engine Statistics -->
+      <section class="card engine-card">
+        <div class="card-header">
+          <span class="card-icon">⚙</span>
+          <span class="card-title">Engine Statistics</span>
+        </div>
+        <div class="engine-row">
+          <span class="engine-label">Over — Wins</span>
+          <span class="engine-value win mono" id="eng-wins-over">0</span>
+        </div>
+        <div class="engine-row">
+          <span class="engine-label">Over — Losses</span>
+          <span class="engine-value loss mono" id="eng-losses-over">0</span>
+        </div>
+        <div class="engine-row">
+          <span class="engine-label">Under — Wins</span>
+          <span class="engine-value win mono" id="eng-wins-under">0</span>
+        </div>
+        <div class="engine-row">
+          <span class="engine-label">Under — Losses</span>
+          <span class="engine-value loss mono" id="eng-losses-under">0</span>
+        </div>
+        <hr class="divider" />
+        <div class="engine-row">
+          <span class="engine-label">Balance Guard (Over)</span>
+          <span class="engine-value" id="eng-guard-over">—</span>
+        </div>
+        <div class="engine-row">
+          <span class="engine-label">Balance Guard (Under)</span>
+          <span class="engine-value" id="eng-guard-under">—</span>
+        </div>
+      </section>
+
+      <!-- START/STOP BIG BUTTON -->
+      <div style="margin-top: auto; padding-top: 20px;">
+        <button id="btn-start" class="control-btn primary" style="width: 100%; height: 60px; font-size: 1.2rem; font-weight: bold; border-radius: var(--radius-md); transition: all 0.3s ease;">
+          Start Live Trades
+        </button>
+      </div>
+
+    </aside>
+
+    <!-- RIGHT COLUMN: Main content area -->
+    <section class="content-section" style="flex-direction: row; gap: 24px;">
+
+      <!-- LEFT SIDE (Markets) -->
+      <div style="flex: 1; display: flex; flex-direction: column; overflow-y: auto;">
+        <div class="section-title">
+          <h1>Market Intelligence</h1>
+        </div>
+        
+        <!-- MARKETS GRID -->
+        <div class="market-grid" id="market-grid" style="padding: 0;">
+        <div class="market-placeholder">
+          <div class="pulse-ring"></div>
+          <p>Waiting for tick data…</p>
+        </div>
+      </div>
+      </div>
+
+      <!-- RIGHT SIDE (History & Logs) -->
+      <div class="bottom-tabs-container" style="flex: 1; display: flex; flex-direction: column; min-width: 420px; overflow: hidden;">
+
+        <!-- TAB BUTTONS -->
+        <div class="tabs horizontal-tabs" style="display: flex; gap: 0; margin-bottom: 0; border-bottom: 1px solid var(--border-subtle);">
+          <button class="tab-btn active" data-tab="tab-history" style="padding: 12px 20px; border-bottom: 2px solid var(--accent-over); font-weight: 600;">Trade History</button>
+          <button class="tab-btn" data-tab="tab-logs" style="padding: 12px 20px; border-bottom: 2px solid transparent;">AI Analytics Logs</button>
+        </div>
+
+        <div class="tab-content" style="flex: 1; display: flex; flex-direction: column; overflow: hidden;">
+
+          <!-- ═══ TRADE HISTORY TAB ═══ -->
+          <div id="tab-history" class="tab-pane active" style="display: flex; flex-direction: column; flex: 1; overflow: hidden;">
+
+            <!-- Stats Header Bar -->
+            <div id="history-stats-bar" style="display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; background: rgba(0,0,0,0.3); border-bottom: 1px solid var(--border-subtle);">
+              <h2 style="font-size: 0.95rem; font-weight: 800; text-transform: uppercase; letter-spacing: 1.5px; color: #fff; margin: 0;">Trade History</h2>
+              <div style="display: flex; gap: 20px; align-items: center;">
+                <div style="text-align: center;">
+                  <div style="font-size: 0.6rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 1px;">Trades</div>
+                  <div id="stat-trade-count" style="font-size: 0.95rem; font-weight: 700; color: #fff; font-family: 'JetBrains Mono', monospace;">0</div>
+                </div>
+                <div style="text-align: center;">
+                  <div style="font-size: 0.6rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 1px;">Session P&L</div>
+                  <div id="stat-session-pnl" style="font-size: 0.95rem; font-weight: 700; color: var(--accent-over); font-family: 'JetBrains Mono', monospace;">$0.00</div>
+                </div>
+                <div style="text-align: center;">
+                  <div style="font-size: 0.6rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 1px;">Max Loss</div>
+                  <div id="stat-max-loss" style="font-size: 0.95rem; font-weight: 700; color: var(--accent-under); font-family: 'JetBrains Mono', monospace;" title="">$0.00</div>
+                </div>
+                <div style="text-align: center;">
+                  <div style="font-size: 0.6rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 1px;">Max Win</div>
+                  <div id="stat-max-win" style="font-size: 0.95rem; font-weight: 700; color: var(--accent-over); font-family: 'JetBrains Mono', monospace;" title="">$0.00</div>
+                </div>
+                <div style="text-align: center;">
+                  <div style="font-size: 0.6rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 1px;">Max Stake</div>
+                  <div id="stat-max-stake" style="font-size: 0.95rem; font-weight: 700; color: #fff; font-family: 'JetBrains Mono', monospace;" title="">$0.00</div>
+                </div>
+                <div style="text-align: center;">
+                  <div style="font-size: 0.6rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 1px;">Uptime</div>
+                  <div id="stat-uptime" style="font-size: 0.95rem; font-weight: 700; color: var(--accent-over); font-family: 'JetBrains Mono', monospace;">00:00:00</div>
+                </div>
+                <button id="btn-clear-history" style="background: none; border: 1px solid rgba(255,75,75,0.4); color: #ff4b4b; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 1rem; line-height: 1; transition: all 0.2s;" title="Clear History">🗑</button>
+              </div>
+            </div>
+
+            <!-- Column Headers -->
+            <div style="display: grid; grid-template-columns: 1.3fr 1fr 1.1fr 0.9fr 0.8fr; padding: 10px 20px; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; color: var(--text-muted); border-bottom: 1px solid var(--border-subtle); background: rgba(0,0,0,0.2);">
+              <span>TIME</span>
+              <span>MARKET</span>
+              <span>TYPE</span>
+              <span>STAKE</span>
+              <span style="text-align: right;">P&L</span>
+            </div>
+
+            <!-- Scrollable Trade Rows -->
+            <div id="history-rows" style="flex: 1; overflow-y: auto; min-height: 0;">
+              <div id="history-empty" style="padding: 40px 20px; text-align: center; color: var(--text-muted); font-size: 0.85rem;">No trades yet — start live trading to see executions here.</div>
+            </div>
+          </div>
+
+          <!-- ═══ AI ANALYTICS LOGS TAB ═══ -->
+          <div id="tab-logs" class="tab-pane" style="display: none; flex: 1; flex-direction: column; overflow: hidden;">
+            <!-- Header with Intelligence Metrics -->
+            <div style="padding: 12px 20px; background: rgba(0,0,0,0.4); border-bottom: 1px solid var(--border-subtle);">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <div>
+                  <h2 style="font-size: 0.9rem; font-weight: 800; text-transform: uppercase; letter-spacing: 1.5px; color: #fff; margin: 0;">Neural Intelligence Monitor</h2>
+                  <div style="font-size: 0.65rem; color: var(--text-muted); margin-top: 2px;">SGDClassifier · Online Partial Fit · Continuous Cross-Market Learning</div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <div style="width: 8px; height: 8px; border-radius: 50%; background: #00d09c; animation: pulse 1.5s infinite;"></div>
+                  <span style="font-size: 0.7rem; color: #00d09c; font-weight: 600; letter-spacing: 1px;">LEARNING LIVE</span>
+                </div>
+              </div>
+              <!-- Stats Row -->
+              <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;">
+                <div style="background: rgba(0,208,156,0.08); border: 1px solid rgba(0,208,156,0.2); border-radius: 8px; padding: 8px 12px; text-align: center;">
+                  <div id="stat-ai-accuracy-label" style="font-size: 0.6rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;">Pred. Accuracy</div>
+                  <div id="stat-ai-accuracy" style="font-size: 1.3rem; font-weight: 800; color: #00d09c; font-family: 'JetBrains Mono', monospace; margin-top: 2px;">--</div>
+                </div>
+                <div style="background: rgba(100,149,237,0.08); border: 1px solid rgba(100,149,237,0.2); border-radius: 8px; padding: 8px 12px; text-align: center;">
+                  <div style="font-size: 0.6rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;">Markets Ready</div>
+                  <div id="stat-markets-ready" style="font-size: 1.3rem; font-weight: 800; color: #6495ed; font-family: 'JetBrains Mono', monospace; margin-top: 2px;">0</div>
+                </div>
+                <div style="background: rgba(255,200,0,0.08); border: 1px solid rgba(255,200,0,0.2); border-radius: 8px; padding: 8px 12px; text-align: center;">
+                  <div style="font-size: 0.6rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;">Virtual Trades</div>
+                  <div id="stat-virtual-trades" style="font-size: 1.3rem; font-weight: 800; color: #ffc800; font-family: 'JetBrains Mono', monospace; margin-top: 2px;">0</div>
+                </div>
+                <div style="background: rgba(255,75,75,0.08); border: 1px solid rgba(255,75,75,0.2); border-radius: 8px; padding: 8px 12px; text-align: center;">
+                  <div style="font-size: 0.6rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;">Recovery Mode</div>
+                  <div id="stat-recovery-mode" style="font-size: 1.3rem; font-weight: 800; color: #ff4b4b; font-family: 'JetBrains Mono', monospace; margin-top: 2px;">OFF</div>
+                </div>
+              </div>
+            </div>
+            <!-- Copy Logs Toolbar -->
+            <div style="display: flex; justify-content: flex-end; align-items: center; padding: 6px 16px; background: rgba(0,0,0,0.3); border-bottom: 1px solid var(--border-subtle); gap: 8px;">
+              <span style="font-size: 0.65rem; color: var(--text-muted); flex: 1;">Live ML inference log — scroll or copy for external analysis</span>
+              <button id="btn-copy-logs" onclick="copyLogs()" style="background: rgba(100,149,237,0.15); border: 1px solid rgba(100,149,237,0.3); color: #6495ed; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.8px; padding: 4px 14px; border-radius: 4px; cursor: pointer; text-transform: uppercase; transition: all 0.2s;" onmouseenter="this.style.background='rgba(100,149,237,0.3)'" onmouseleave="this.style.background='rgba(100,149,237,0.15)'">⎘ Copy Logs</button>
+              <button onclick="document.getElementById('ai-logs-terminal').innerHTML='<div class=\'log-entry dim\'>Log cleared.</div>'; window._aiLogBuffer=[];" style="background: rgba(255,75,75,0.1); border: 1px solid rgba(255,75,75,0.2); color: #ff4b4b; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.8px; padding: 4px 14px; border-radius: 4px; cursor: pointer; text-transform: uppercase; transition: all 0.2s;" onmouseenter="this.style.background='rgba(255,75,75,0.25)'" onmouseleave="this.style.background='rgba(255,75,75,0.1)'">✕ Clear</button>
+            </div>
+            <div class="ai-logs-terminal" id="ai-logs-terminal" style="flex: 1; overflow-y: auto; min-height: 0; background: #05080c; padding: 16px; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;">
+              <div class="log-entry dim">Awaiting ML models to initialize...</div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- ── CONFIDENCE TOOLTIP ─────────────────────────────────────────────── -->
+  <div id="tooltip" class="tooltip hidden"></div>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>

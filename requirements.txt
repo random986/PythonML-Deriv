@@ -1,0 +1,11 @@
+# Async HTTP client — needed for new Deriv REST API (get accounts, OTP)
+aiohttp>=3.9.0
+
+# Async WebSocket client — used for the OTP WebSocket and public market data WS
+websockets>=12.0
+
+# Online Machine Learning
+scikit-learn>=1.4.0
+
+# Numerical computing (required by scikit-learn, used directly in feature engineering)
+numpy>=1.26.0
