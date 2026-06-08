@@ -38,6 +38,15 @@ class MartingaleTracker:
     features: list[float] = field(default_factory=list)
     global_ctx: float = 0.5
 
+    def reset_stake(self) -> None:
+        logger.info("[Martingale/%s] Resetting stake to base (%.2f) and resetting step.",
+                    self.side, config.BASE_STAKE)
+        self.stake = config.BASE_STAKE
+        self.step = 0
+        self.active = False
+        self.last_contract_id = None
+        self.features = []
+
     def record_win(self) -> None:
         logger.info("[Martingale/%s] WIN at step %d (stake=%.2f). Resetting.",
                     self.side, self.step, self.stake)
@@ -138,9 +147,9 @@ class DerivTradingBot:
         self._last_real_result = {s: {"over": None, "under": None} for s in config.SYMBOLS}
         # Per-symbol virtual recovery
         self._last_virtual_result = {s: {"over": None, "under": None} for s in config.SYMBOLS}
-        
-        self._over_brain = GatekeeperBrain("OVER")
-        self._under_brain = GatekeeperBrain("UNDER")
+        self._over_brain = GatekeeperBrain("over")
+        self._under_brain = GatekeeperBrain("under")
+
         self._global_trade_results = collections.deque(maxlen=100)
         
         # TRUE prediction accuracy counters
@@ -231,12 +240,16 @@ class DerivTradingBot:
         - Digit entropy (how spread/concentrated the digit distribution is)
         - Consecutive over-5 streak
         - Consecutive under-5 streak
+        - digit delta
+        - is_last_digit_5 (1.0 if last digit was 5, else 0.0)
+        - ticks_since_5_norm (distance since last digit 5, normalized)
+        - freq_5_short (frequency of digit 5 in last 15 ticks to detect clustering)
         """
         from collections import Counter
         import math
         
         if len(history) < 50:
-            return [0.0] * 26  # Return zeros if not enough data
+            return [0.0] * 29  # Return zeros if not enough data
         
         # Extract last digits from recent price history
         recent = history[-50:]
@@ -316,8 +329,23 @@ class DerivTradingBot:
                 under5_streak += 1
             else:
                 break
+
+        # ── DIGIT 5 SPECIFIC FEATURES ──
+        is_last_digit_5 = 1.0 if digits[-1] == 5 else 0.0
         
-        # Combine all features into a single vector (26 features total)
+        # Ticks since last digit 5
+        ticks_since_5 = 0
+        for i in range(len(digits) - 1, -1, -1):
+            if digits[i] == 5:
+                break
+            ticks_since_5 += 1
+        ticks_since_5_norm = min(ticks_since_5 / 20.0, 1.0)
+        
+        # Short-term digit 5 frequency (last 15 ticks)
+        short_recent = digits[-15:]
+        freq_5_short = sum(1 for d in short_recent if d == 5) / len(short_recent)
+        
+        # Combine all features into a single vector (29 features total)
         features = (
             freq +  # 10 features: digit frequency distribution
             [
@@ -337,6 +365,9 @@ class DerivTradingBot:
                 over5_streak / 5.0,          # recent consecutive over-5 streak
                 under5_streak / 5.0,         # recent consecutive under-5 streak
                 (digits[-1] - digits[-2]) / 9.0 if len(digits) >= 2 else 0.0,  # digit delta
+                is_last_digit_5,             # 1.0 if last digit was 5
+                ticks_since_5_norm,          # distance since last digit 5
+                freq_5_short,                # short term digit 5 clustering
             ]
         )
         return features
@@ -374,132 +405,278 @@ class DerivTradingBot:
         features = self._extract_continuous_tensor(self._tick_history[symbol])
         global_ctx = self._get_global_shadow_context()
 
-        # Get continuous ML verdicts
-        over_v, over_c = self._over_brain.get_verdict(features, global_ctx)
-        under_v, under_c = self._under_brain.get_verdict(features, global_ctx)
+        # Get the brain's entry score for this market tick
+        # (warm-up returns 0.5 neutral — no hardcoded gates)
+        over_step_now = self._global_tracker_over.step
+        under_step_now = self._global_tracker_under.step
+        recovery_context = [
+            over_step_now / 10.0,    # How deep is the over recovery? (normalized)
+            under_step_now / 10.0,   # How deep is the under recovery? (normalized)
+            global_ctx,              # Global win/loss ratio across all recent trades
+        ]
+        score_over = self._over_brain.get_entry_score(features, recovery_context)
+        score_under = self._under_brain.get_entry_score(features, recovery_context)
         
-        # State key is no longer a string, just a placeholder for the virtual queues
+        # Decide the unified entry score for this market based on who needs to recover most
+        if over_step_now > under_step_now:
+            entry_score = score_over
+        elif under_step_now > over_step_now:
+            entry_score = score_under
+        else:
+            entry_score = max(score_over, score_under)
+
+        predicted_side = "over" if score_over >= score_under else "under"
         state_key = "CONTINUOUS_ML"
-        
+
         # Update UI stats
-        self._market_stats[symbol]["p_over"] = over_c
-        self._market_stats[symbol]["p_under"] = under_c
+        self._market_stats[symbol]["p_over"] = entry_score
+        self._market_stats[symbol]["p_under"] = 1.0 - entry_score
+        self._market_stats[symbol]["entry_score"] = entry_score
 
         # ── VIRTUAL TRADES — always fire both sides, all markets, no rules ──
-        # The brain learns purely from outcomes. No hardcoded gating.
         v_tracker_over = self._virtual_trackers_over[symbol]
         v_tracker_under = self._virtual_trackers_under[symbol]
-        
-        # Determine the model's actual prediction: whichever side it's MORE confident about.
-        # Only the OVER-side vtrade carries this flag so we count once per cycle.
-        predicted_side = "over" if over_c >= under_c else "under"
-        
+
+        predicted_side = "over" if entry_score >= 0.5 else "under"
+
         if not v_tracker_over.active:
             v_tracker_over.features = features
             v_tracker_over.global_ctx = global_ctx
-            self._queue_virtual_trade(symbol, "over", state_key, over_c * 100, predicted_side=predicted_side)
+            self._queue_virtual_trade(symbol, "over", state_key, entry_score * 100, predicted_side=predicted_side)
         if not v_tracker_under.active:
             v_tracker_under.features = features
             v_tracker_under.global_ctx = global_ctx
-            self._queue_virtual_trade(symbol, "under", state_key, under_c * 100)
+            self._queue_virtual_trade(symbol, "under", state_key, (1.0 - entry_score) * 100)
 
         # ── REAL TRADES ────────────────────────────────────────────────
         if self._is_paused:
             return
-            
-        # During warm-up, bypass the AI gate so the model can gather real data.
-        in_warmup = (
-            self._over_brain.update_count < self._over_brain.WARMUP_UPDATES or
-            self._under_brain.update_count < self._under_brain.WARMUP_UPDATES
-        )
-        # ── AI-DRIVEN RECOVERY MARKET SELECTION ──
-        # The AI has learned what conditions yield Over 5 and Under 5.
-        # When one side is in recovery (Martingale step > 0), the AI finds
-        # the market where its learned model says that side has the best chance.
-        # When both sides are at step 0, pick the strongest overall signal.
-        # NO hardcoded thresholds — purely the AI's learned probabilities.
-        over_step = self._global_tracker_over.step
-        under_step = self._global_tracker_under.step
-        
-        # Determine which side needs recovery
-        if over_step > under_step:
-            # Over side needs recovery — find best Over market
-            my_score = over_c
-            best_score = max((m.get("p_over", 0.0) for m in self._market_stats.values()), default=0.0)
-        elif under_step > over_step:
-            # Under side needs recovery — find best Under market
-            my_score = under_c
-            best_score = max((m.get("p_under", 0.0) for m in self._market_stats.values()), default=0.0)
-        else:
-            # Both at same step — pick strongest overall signal
-            my_score = max(over_c, under_c)
-            best_score = max((max(m.get("p_over", 0.0), m.get("p_under", 0.0)) for m in self._market_stats.values()), default=0.0)
-        
-        # Only fire if this market is the best for recovery right now.
-        if not in_warmup and my_score < best_score:
+
+        import time
+        now = time.time()
+
+        # ── CALIBRATION PAUSE (after 4+ consecutive losses) ──
+        if hasattr(self, "_pause_until") and now < self._pause_until:
+            remaining = self._pause_until - now
+            if int(remaining) % 10 == 0:
+                self._log_ai(f"⏳ [CALIBRATION] Paused {remaining:.0f}s — ML absorbing market shift.")
             return
-            
-        # GLOBAL LOCK: Only one trade at a time across ALL 15 markets.
+
+        # ── WARM-UP CHECK ──
+        in_warmup = (self._over_brain.update_count < self._over_brain.WARMUP_UPDATES or 
+                     self._under_brain.update_count < self._under_brain.WARMUP_UPDATES)
+
+        # ── WATCHDOG: release stale lock ──
         if getattr(self, "_global_real_trade_active", False):
-            import time
-            if hasattr(self, "_last_real_trade_time") and time.time() - self._last_real_trade_time > 15.0:
+            if hasattr(self, "_last_real_trade_time") and now - self._last_real_trade_time > 15.0:
                 self._log_ai("⚠️ [WATCHDOG] Lock timeout — forcing release.")
                 self._global_tracker_over.active = False
                 self._global_tracker_under.active = False
                 self._global_real_trade_active = False
+                for t in self._trade_history:
+                    if t.get("status") == "open":
+                        t["status"] = "failed"
+                        t["profit"] = 0.0
+                        t["digit"] = "Err"
             else:
-                return  # Trade already in-flight, skip this tick
+                return  # Trade in-flight, skip tick
 
-        # COOLDOWN: only one trade every 2 seconds to avoid tick-flood
-        import time
-        now = time.time()
-        if now - getattr(self, "_last_real_trade_time", 0) < 2.0:
-            return
+        # ── ML THINKING: Is this market a good entry right now? ──
+        # The brain returns an entry_score already computed above for this tick.
+        # We compare this market's score against all others the ML has scored
+        # this cycle. Fire only on the market the ML ranks highest.
+        # No hardcoded gaps, no step comparisons — this IS the ML's decision.
+        if not in_warmup:
+            # Avoid placing trades if the ML predicts a digit 5 (both sides under 0.5 confidence)
+            if score_over < 0.5 and score_under < 0.5:
+                self._log_ai(
+                    f"🛑 [ML-AVOID] {symbol} | score_over={score_over:.3f} | "
+                    f"score_under={score_under:.3f} | Predicted Digit 5 (both sides < 0.5). Skipping trade."
+                )
+                return
 
-        # ── FIRE ────────────────────────────────────────────────────────
+            best_score = max(
+                (m.get("entry_score", 0.0) for m in self._market_stats.values()),
+                default=0.0
+            )
+            self._log_ai(
+                f"🧠 [ML-THINK] {symbol} | entry_score={entry_score:.3f} | "
+                f"best_in_market={best_score:.3f} | "
+                f"recovery=[over_step={over_step_now} under_step={under_step_now}]"
+            )
+            # Fire if this market is among the best options currently available
+            # (within a tiny margin of the max) to prevent stale-max race conditions.
+            # No hardcoded minimum confidence! The ML freely chooses the best relative market.
+            if entry_score < best_score - 0.02:
+                return  # Another market is relatively better
+
+        # ── FIRE ──────────────────────────────────────────────────────────────
         self._global_real_trade_active = True
         self._last_real_trade_time = now
-        
-        # Save features for learning when the trade resolves
+
+        # Snapshot the exact features + recovery context this ML decision was based on
         self._global_tracker_over.features = features
         self._global_tracker_over.global_ctx = global_ctx
+        self._global_tracker_over.recovery_context = recovery_context
         self._global_tracker_under.features = features
         self._global_tracker_under.global_ctx = global_ctx
+        self._global_tracker_under.recovery_context = recovery_context
 
-        self._log_ai(f"🚀 [TRADE] Firing on {symbol} | OVER={over_c*100:.0f}% UNDER={under_c*100:.0f}% | warmup={'YES' if in_warmup else 'NO'}")
+        self._log_ai(
+            f"🚀 [TRADE] {symbol} | ML_score={entry_score:.3f} | "
+            f"step=[O:{over_step_now} U:{under_step_now}] | warmup={'YES' if in_warmup else 'NO'}"
+        )
 
         import asyncio
         asyncio.create_task(
-            self._dual_execute(symbol, state_key, over_c * 100, under_c * 100)
+            self._dual_execute(symbol, state_key, entry_score * 100, (1.0 - entry_score) * 100)
         )
+
+    def _get_current_balance(self) -> float:
+        current_id = self._client._current_account_id
+        if self._client.accounts:
+            for acc in self._client.accounts:
+                if acc.get("account_id") == current_id:
+                    return float(acc.get("balance", 0.0))
+        return 0.0
 
     async def _dual_execute(self, symbol: str, state_key: str, p_over: float, p_under: float) -> None:
         """Fires both sides at the exact same instance."""
         import asyncio
-        try:
-            await asyncio.gather(
-                self._execute_side(symbol, "over", state_key, p_over),
-                self._execute_side(symbol, "under", state_key, p_under)
-            )
-        except Exception as e:
-            logger.error(f"[DUAL EXECUTE ERROR] {e}")
-            self._global_real_trade_active = False
+        import time
 
-    async def _execute_side(self, symbol: str, side: str, state_key: str, conf: float) -> None:
         if not self._client.is_auth_ready:
+            self._log_ai("⚠️ [TRADE ERROR] Auth WS is not ready. Skipping trade.")
+            self._global_real_trade_active = False
             return
-            
-        tracker = self._global_tracker_over if side == "over" else self._global_tracker_under
-        
-        if tracker.active:
+
+        # Ensure trackers are not active
+        if self._global_tracker_over.active or self._global_tracker_under.active:
+            self._log_ai("⚠️ [TRADE ERROR] One of the trackers is already active. Skipping trade.")
+            self._global_real_trade_active = False
             return
-            
-        tracker.active = True
-        tracker.current_market = symbol
-        # Note: state_key is no longer stored on tracker (replaced by features/global_ctx)
-        
-        self._log_ai(f"[DECISION] {symbol} | {side.upper()} 5 | conf={conf:.1f}%")
-        await self._fire_trade(symbol, side, tracker.stake, state_key)
+
+        # Balance check
+        needed_balance = self._global_tracker_over.stake + self._global_tracker_under.stake
+        current_balance = self._get_current_balance()
+        if current_balance < needed_balance:
+            self._log_ai(f"⚠️ [BALANCE CHECK] Insufficient balance for dual trade: need ${needed_balance:.2f}, have ${current_balance:.2f}. Resetting Martingale stakes to base!")
+            self._global_tracker_over.reset_stake()
+            self._global_tracker_under.reset_stake()
+            needed_balance = self._global_tracker_over.stake + self._global_tracker_under.stake
+            if current_balance < needed_balance:
+                self._log_ai("⚠️ [BALANCE CHECK] Still insufficient balance even for base stake! Skipping trade.")
+                self._global_real_trade_active = False
+                return
+
+        # Prepare Over trade
+        stake_over = self._global_tracker_over.stake
+        if stake_over > self._max_stake:
+            self._max_stake = stake_over
+        req_id_over = self._next_req_id()
+        payload_over = {
+            "buy": "1",
+            "subscribe": 1,
+            "price": stake_over,
+            "parameters": {
+                "amount": stake_over,
+                "basis": "stake",
+                "contract_type": "DIGITOVER",
+                "currency": "USD",
+                "duration": 1,
+                "duration_unit": "t",
+                "underlying_symbol": symbol,
+                "barrier": "5"
+            },
+            "req_id": req_id_over
+        }
+
+        # Prepare Under trade
+        stake_under = self._global_tracker_under.stake
+        if stake_under > self._max_stake:
+            self._max_stake = stake_under
+        req_id_under = self._next_req_id()
+        payload_under = {
+            "buy": "1",
+            "subscribe": 1,
+            "price": stake_under,
+            "parameters": {
+                "amount": stake_under,
+                "basis": "stake",
+                "contract_type": "DIGITUNDER",
+                "currency": "USD",
+                "duration": 1,
+                "duration_unit": "t",
+                "underlying_symbol": symbol,
+                "barrier": "5"
+            },
+            "req_id": req_id_under
+        }
+
+        # Synchronously setup trackers
+        self._global_tracker_over.active = True
+        self._global_tracker_over.current_market = symbol
+        self._global_tracker_under.active = True
+        self._global_tracker_under.current_market = symbol
+
+        self._pending_buys[req_id_over] = ("over", symbol, stake_over, state_key)
+        self._pending_buys[req_id_under] = ("under", symbol, stake_under, state_key)
+
+        # Record in trade history
+        now_ts = time.time()
+        trade_record_over = {
+            "req_id": req_id_over,
+            "timestamp": now_ts,
+            "symbol": symbol,
+            "side": "over",
+            "stake": stake_over,
+            "status": "open",
+            "profit": 0.0,
+            "digit": "-"
+        }
+        trade_record_under = {
+            "req_id": req_id_under,
+            "timestamp": now_ts,
+            "symbol": symbol,
+            "side": "under",
+            "stake": stake_under,
+            "status": "open",
+            "profit": 0.0,
+            "digit": "-"
+        }
+        self._trade_history.insert(0, trade_record_over)
+        self._trade_history.insert(0, trade_record_under)
+
+        self._log_ai(f"[DECISION] {symbol} | OVER 5 | conf={p_over:.1f}% | stake=${stake_over:.2f} | req_id={req_id_over}")
+        self._log_ai(f"[DECISION] {symbol} | UNDER 5 | conf={p_under:.1f}% | stake=${stake_under:.2f} | req_id={req_id_under}")
+
+        # Send both WebSocket payloads back-to-back using asyncio.gather
+        try:
+            results = await asyncio.gather(
+                self._client.send_trade(payload_over),
+                self._client.send_trade(payload_under)
+            )
+            if not all(results):
+                logger.error(f"[DUAL EXECUTE ERROR] One or both sends failed: {results}")
+                if not results[0]:
+                    self._global_tracker_over.active = False
+                    self._pending_buys.pop(req_id_over, None)
+                    trade_record_over["status"] = "failed"
+                if not results[1]:
+                    self._global_tracker_under.active = False
+                    self._pending_buys.pop(req_id_under, None)
+                    trade_record_under["status"] = "failed"
+                if not self._global_tracker_over.active and not self._global_tracker_under.active:
+                    self._global_real_trade_active = False
+        except Exception as e:
+            logger.error(f"[DUAL EXECUTE ERROR] send failed: {e}")
+            self._global_tracker_over.active = False
+            self._global_tracker_under.active = False
+            self._global_real_trade_active = False
+            self._pending_buys.pop(req_id_over, None)
+            self._pending_buys.pop(req_id_under, None)
+            trade_record_over["status"] = "failed"
+            trade_record_under["status"] = "failed"
 
     def _queue_virtual_trade(self, symbol: str, side: str, state_key: str, conf: float, predicted_side: str = None) -> None:
         tracker = self._virtual_trackers_over[symbol] if side == "over" else self._virtual_trackers_under[symbol]
@@ -561,11 +738,34 @@ class DerivTradingBot:
         other_side = "under" if side == "over" else "over"
         self._last_virtual_result[symbol][other_side] = None
 
-        if side == "over":
-            self._over_brain.update(features, global_ctx, won)
-        else:
-            self._under_brain.update(features, global_ctx, won)
-            
+        # Update the brain: was this a recovery success?
+        # The virtual trade helps the brain learn faster (many more samples per second).
+        v_recovery_ctx = [
+            self._global_tracker_over.step / 10.0,
+            self._global_tracker_under.step / 10.0,
+            global_ctx
+        ]
+        # Route the virtual learning to the correct side-specific brain
+        # If the digit is 5, apply a 3.0x weight penalty to make the AI learn to avoid it
+        v_weight = tracker.stake * 3.0 if digit == 5 else tracker.stake
+        try:
+            if side == "over":
+                self._over_brain.update(
+                    market_features=features,
+                    recovery_context=v_recovery_ctx,
+                    recovery_succeeded=won,
+                    weight=v_weight
+                )
+            else:
+                self._under_brain.update(
+                    market_features=features,
+                    recovery_context=v_recovery_ctx,
+                    recovery_succeeded=won,
+                    weight=v_weight
+                )
+        except Exception as e:
+            logger.error(f"[V-BRAIN UPDATE ERROR] {e} — skipping, continuing.")
+
         tracker.current_market = ""
 
     # ── Trade execution ───────────────────────────────────────────────────────
@@ -578,6 +778,7 @@ class DerivTradingBot:
 
         payload = {
             "buy": "1",
+            "subscribe": 1,
             "price": stake,
             "parameters": {
                 "amount": stake,
@@ -614,20 +815,38 @@ class DerivTradingBot:
         entry  = self._pending_buys.pop(req_id, None)
 
         if "error" in msg:
-            self._global_real_trade_active = False
+            error_code = msg["error"].get("code", "")
             logger.error("[TRADE] Buy failed (req_id=%d): %s", req_id, msg["error"])
             if entry:
                 side, symbol, stake, state_key = entry
                 tracker = self._global_tracker_over if side == "over" else self._global_tracker_under
                 tracker.active = False
+                
+                # If we hit API limits or ran out of money, we MUST reset the Martingale
+                # otherwise the bot will try to place the exact same impossible stake forever.
+                if error_code in ("PayoutLimits", "InsufficientBalance", "InvalidStake"):
+                    logger.warning(f"[{error_code}] API rejected stake of ${stake}. Resetting Martingale for {side} side.")
+                    tracker.reset_stake()
+                    self._real_stats["losses"][side] += 1 # Optionally tally as a definitive loss
+
             for t in self._trade_history:
                 if t.get("req_id") == req_id:
                     t["status"] = "failed"
                     break
+            
+            # Release the global lock only if both trackers are now inactive
+            if not self._global_tracker_over.active and not self._global_tracker_under.active:
+                self._global_real_trade_active = False
             return
 
         buy_data    = msg.get("buy", {})
         contract_id = str(buy_data.get("contract_id", ""))
+
+        # Link the contract_id to the exact trade in history
+        for t in self._trade_history:
+            if t.get("req_id") == req_id:
+                t["contract_id"] = contract_id
+                break
 
         if entry:
             side, symbol, stake, state_key = entry
@@ -655,7 +874,7 @@ class DerivTradingBot:
             if current_spot and tracker is not None:
                 digit = current_spot[-1]
                 for t in self._trade_history:
-                    if t.get("side") == tracker.side and t.get("status") == "open":
+                    if t.get("contract_id") == contract_id and t.get("status") == "open":
                         t["digit"] = digit
                         break
             return
@@ -691,10 +910,10 @@ class DerivTradingBot:
         now_str = time.strftime("%Y-%m-%d %H:%M:%S")
         self._log_ai(f"[SETTLE] side={side} | contract={contract_id} | profit=${profit:.2f} | won={won}")
 
-        # Find the matching trade entry
+        # Find the exact matching trade entry by contract_id
         matched_symbol = ""
         for t in self._trade_history:
-            if t.get("side") == side and t.get("status") == "open":
+            if t.get("contract_id") == contract_id and t.get("status") == "open":
                 t["status"] = "sold"
                 t["profit"] = profit
                 t["digit"] = final_digit
@@ -706,6 +925,7 @@ class DerivTradingBot:
         # CRITICAL FIX: Capture features BEFORE record_win/loss clears them
         features_to_learn = tracker.features
         ctx_to_learn = tracker.global_ctx
+        stake_at_trade = tracker.stake
         
         # Update REAL stats (completely separate from virtual)
         self._session_pnl += profit
@@ -719,6 +939,12 @@ class DerivTradingBot:
             self._real_stats["losses"][side] += 1
             self._last_real_result[symbol][side] = False
             self._log_ai(f"[Martingale/{symbol}/{side}] LOSS. Escalating stake to ${tracker.stake:.2f}.")
+
+            if tracker.step >= 4:
+                import random
+                pause_dur = random.randint(20, 60)
+                self._pause_until = time.time() + pause_dur
+                self._log_ai(f"⚠️ [CALIBRATION PAUSE] {tracker.step} consecutive losses on {side.upper()}! Pausing real trades for {pause_dur}s to recalibrate AI.")
 
         # Track max loss and max win with timestamps
         if profit < 0 and abs(profit) > abs(self._max_loss["amount"]):
@@ -743,15 +969,40 @@ class DerivTradingBot:
         # Add to global shadow context
         self._global_trade_results.append(won)
 
-        if side == "over":
-            self._over_brain.update(features_to_learn, ctx_to_learn, won)
-            # We also save to disk occasionally
-            if len(self._global_trade_results) % 5 == 0:
-                self._over_brain.save()
-        else:
-            self._under_brain.update(features_to_learn, ctx_to_learn, won)
-            if len(self._global_trade_results) % 5 == 0:
-                self._under_brain.save()
+        # ── ML BRAIN UPDATE ──
+        # features_to_learn and ctx_to_learn were captured at line 739,
+        # BEFORE record_win/loss cleared them on the tracker.
+        recovery_ctx = getattr(tracker, "recovery_context", [
+            self._global_tracker_over.step / 10.0,
+            self._global_tracker_under.step / 10.0,
+            ctx_to_learn
+        ])
+        recovery_succeeded = won
+
+        try:
+            if features_to_learn is not None:
+                real_weight = stake_at_trade * 3.0 if final_digit == "5" else stake_at_trade
+                if side == "over":
+                    self._over_brain.update(
+                        market_features=features_to_learn,
+                        recovery_context=recovery_ctx,
+                        recovery_succeeded=recovery_succeeded,
+                        weight=real_weight
+                    )
+                else:
+                    self._under_brain.update(
+                        market_features=features_to_learn,
+                        recovery_context=recovery_ctx,
+                        recovery_succeeded=recovery_succeeded,
+                        weight=real_weight
+                    )
+                
+                # Check for periodic save on the over brain (as a proxy for both)
+                if len(self._global_trade_results) % 5 == 0:
+                    self._over_brain.save()
+                    self._under_brain.save()
+        except Exception as e:
+            logger.error(f"[BRAIN UPDATE ERROR] {e} — skipping this update, continuing trading.")
 
     # ── Local WebSocket broadcast server ──────────────────────────────────────
 

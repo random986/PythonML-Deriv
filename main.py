@@ -71,7 +71,7 @@ def _print_banner() -> None:
 ║  Markets   : {len(config.SYMBOLS)} symbols monitored                          ║
 ║  Demo time : {config.DEMO_DURATION_SECONDS // 60} minutes ({config.DEMO_DURATION_SECONDS}s) of shadow learning           ║
 ║  Base stake: ${config.BASE_STAKE:<10.2f}                                    ║
-║  Recovery   : {config.MAX_MARTINGALE_STEPS} steps max, {config.MARTINGALE_MULTIPLIER}x multiplier                  ║
+║  Recovery   : Infinite (No limit), 2x multiplier                  ║
 ║  Broadcast : {"ws://" + config.LOCAL_WS_HOST + ":" + str(config.LOCAL_WS_PORT) if config.ENABLE_LOCAL_WS_BROADCAST else "disabled":<35}   ║
 ╚══════════════════════════════════════════════════════════════╝
 """
